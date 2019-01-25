@@ -1,0 +1,117 @@
+import meep as mp
+
+resolution = 10 # pixels/um
+
+dpml = 1.0
+pml_layers = [mp.PML(dpml)]
+
+N = 10      # number of Bragg cells (X direction)
+a = 0.40    # Bragg period (X direction)
+r = 0.20    # length of tooth (X direction)
+h = 0.22    # height of waveguide (Z direction)
+e = 0.5    # width of tooth (Y direction)
+w = 0.40    # width of waveguide (groove)
+
+sx = N*a+4  # size of cell in X direction
+sy = 16*w   # size of cell in Y direction
+sz = 16*h   # size of cell in Z direction
+cell = mp.Vector3(sx,sy,sz)
+
+nSi = 3.4757
+Si = mp.Medium(index=nSi)
+
+geometry = [mp.Block(mp.Vector3(mp.inf,w,h),center=mp.Vector3(0,0,0),material=Si)]
+
+for i in range(N): # To normalise the transmission and reflectance to the perturbed epsilon not to the straight waveguide
+    geometry.append(mp.Block(mp.Vector3(a-r,w,h),center=mp.Vector3(-0.5*sx+2+0.5*(a-r)+i*a,0,0),material=Si))
+
+lambda_min = 1.48        # minimum source wavelength
+lambda_max = 1.64        # maximum source wavelength
+fmin = 1/lambda_max
+fmax = 1/lambda_min
+fcen = 0.5*(fmin+fmax)
+df = fmax-fmin
+
+sources = [mp.Source(mp.GaussianSource(fcen,fwidth=df), component=mp.Ey,
+                     center=mp.Vector3(-0.5*sx+1,0,0),size=mp.Vector3(0,w,0))]
+
+sim = mp.Simulation(cell_size=cell,
+                    boundary_layers=pml_layers,
+                    geometry=geometry,
+                    sources=sources,
+                    resolution=resolution)
+
+nfreq = 100  # number of frequencies at which to compute flux
+
+# reflected flux
+refl_fr = mp.FluxRegion(center=mp.Vector3(-0.5*sx+dpml+0.5,0,0),size=mp.Vector3(0,2*w,2*h),direction=mp.X)
+refl = sim.add_flux(fcen,df,nfreq,refl_fr)
+
+# transmitted flux
+tran_fr = mp.FluxRegion(center=mp.Vector3(0.5*sx-dpml,0,0),size=mp.Vector3(0,2*w,2*h),direction=mp.X)
+tran = sim.add_flux(fcen,df,nfreq,tran_fr)
+
+pt = mp.Vector3(0.5*sx-dpml-0.5,0)
+
+sim.run(until_after_sources=mp.stop_when_fields_decayed(50,mp.Ey,pt,1e-3))
+
+# for normalization run, save flux fields data for reflection plane
+straight_refl_data = sim.get_flux_data(refl)
+
+# save incident power for transmission plane
+straight_tran_flux = mp.get_fluxes(tran)
+
+sim.reset_meep()
+
+geometry = [mp.Block(mp.Vector3(mp.inf,w,h),center=mp.Vector3(0,0,0),material=Si)]
+
+for i in range(N):
+    geometry.append(mp.Block(mp.Vector3(a-r,e+i*0.02,h),center=mp.Vector3(-0.5*sx+2+0.5*(a-r)+i*a,0,0),material=Si))
+
+
+sim = mp.Simulation(cell_size=cell,
+                    boundary_layers=pml_layers,
+                    geometry=geometry,
+                    sources=sources,
+                    resolution=resolution)
+
+# reflected flux
+refl = sim.add_flux(fcen, df, nfreq, refl_fr)
+
+tran = sim.add_flux(fcen,df,nfreq,tran_fr)
+
+# for normal run, load negated fields to subtract incident from refl. fields
+sim.load_minus_flux_data(refl,straight_refl_data)
+
+sim.run(until_after_sources=mp.stop_when_fields_decayed(50, mp.Ey, pt, 1e-3))
+
+bend_refl_flux = mp.get_fluxes(refl)
+bend_tran_flux = mp.get_fluxes(tran)
+
+flux_freqs = mp.get_flux_freqs(refl)
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+eps_data = sim.get_array(center=mp.Vector3(), size=mp.Vector3(sx,sy,0), component=mp.Dielectric)
+plt.figure(dpi=100)
+plt.imshow(eps_data.transpose(), interpolation='spline36', cmap='RdBu')
+#plt.axis('off')
+plt.show()
+
+wl = []
+Rs = []
+Ts = []
+
+for i in range(0,nfreq):
+    wl = np.append(wl, 1/flux_freqs[i])
+    Rs = np.append(Rs,-bend_refl_flux[i]/straight_tran_flux[i])
+    Ts = np.append(Ts,bend_tran_flux[i]/straight_tran_flux[i])
+
+plt.plot(wl,Rs,'bo-',label='reflectance')
+plt.plot(wl,Ts,'ro-',label='transmittance')
+plt.plot(wl,1-Rs-Ts,'go-',label='loss')
+plt.axis([min(wl), max(wl), 0, 1])
+plt.xlabel("wavelength (μm)")
+plt.legend(loc="upper right")
+plt.show()
